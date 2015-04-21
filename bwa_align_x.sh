@@ -1,4 +1,5 @@
 #!/bin/bash -x
+
 #
 # Written/extended by a.llave@irri.org 16APR2015-0953
 #
@@ -21,32 +22,39 @@ IN_FQ=$1
 OUT_PFX=$2
 ASSEMBLY=$3
 PAIRED=$4
-SORT_BAM=$5
+RGROUP=$5
+SORT_BAM=$6
 
 POST_BWA_SAM_OUTPUT_FILENAME=${IN_FQ/_1.fastq/.sam};
+FIXEDMATE_NAME=${POST_BWA_SAM_OUTPUT_FILENAME/.sam/_fixmate.bam}
 
 # samtools directory
-SAMTOOLS_DIR_X="/home/applications/samtools-0.1.7_x86_64-linux"
+SAMTOOLS_DIR_X="/home/applications/samtools-0.1.19/"
 
 # where is your bwa?
-BWA_DIR_X="/home/applications/bwa-0.7.5a"
+BWA_DIR_X="/usr/bin"
+
+COMPRESS_SAM_PID=-1
+
+PRE_FIXMATE_NAME="";
 
 # show usage if we don't have 4 command-line arguments
 if [ "$PAIRED" == "" ]; then
     echo "-----------------------------------------------------------------";
     echo "Align fastq data with bwa, producing a sorted indexed BAM file.";
     echo " ";
-    echo "align_bwa.sh in_file out_pfx assembly paired(0|1) [0|1]";
+    echo "align_bwa.sh in_file out_pfx reference paired(0|1) [0|1]";
     echo " ";
     echo "  in_file   For single-end alignments, path of the input fastq file.";
     echo "            For paired-end alignemtts, path to the the R1 fastq file"
     echo "            which must contain the string '_1.fq' in its name. The ";
     echo "            R2 file is thus expected to be named '_2.fq' automatically. ";
     echo "  out_pfx   Desired prefix of output files.";
-    echo "  assembly  Default: hg19 hg18 mm10 mm9 sacCer3 sacCer3 ecoli, else, ";
-    echo "              supply sequence file in absolute path ";
+    echo "  reference  Supply sequence file in absolute path ";
     echo "  paired    0 = single end alignment; 1 = paired end.";
-    echo "  sort_bam  [Optional] Default is 0 - do not sort. 1 to sort.";
+    echo "  rg        Read group label.";
+    echo "  sort_bam  [Optional] Also does fixmate/clean up read pairing information".
+    echo "            Default is 0 - do not sort. 1 to sort.";
     echo " ";
     echo "Example:";
     echo "  align_bwa.sh my.fastq mrna_b1_ln1 hg18 0";
@@ -101,8 +109,8 @@ ckFileSz() {
 if [ "$SORT_BAM" == ""  ]; then
         SORT_BAM="0";
 else
-       if [ ! ( "$SORT_BAM" == "0" -o "$SORT_BAM" == "1") ]; then
-               echo "Invalid parameter supplied for sort_bam (parameter 5).";
+       if [ \( "$SORT_BAM" == "0" -o "$SORT_BAM" == "1" \) ne 1 ]; then
+               echo "Invalid parameter supplied for sort_bam (parameter 6).";
                exit 1;
        fi
        echo "Will be not sorting BAM.";
@@ -132,7 +140,7 @@ REF_PFX="$ASSEMBLY";
 #   having well-defined read group information.
 # Here we set the RG variable to be the read group line we want
 #   inserted in the header.
-READ_GRP=$OUT_PFX;
+READ_GRP=$RGROUP;
 RG='@RG\tID:1\tPL:ILLUMINA\tSM:'$READ_GRP'\tDS:ref='$ASSEMBLY',pfx='$REF_PFX
 
 # Display how the program will be run, including
@@ -147,11 +155,13 @@ else
 echo "  input file:        $IN_FQ";
 fi
 echo "  output prefix:     $OUT_PFX";
-echo "  assembly:          $ASSEMBLY";
+echo "  reference:          $ASSEMBLY";
 echo "  bwa version:       $BWA_VER";
 echo "  ref prefix:        $REF_PFX";
-echo "  read group line:   $RG";
+echo "  read group line:   $RG"
+echo "  will sort and fixmate BAM?:    $SORT_BAM";
 echo "---------------------------------------------------------";
+
 echo "";
 echo "`date`: Sleeping for 10 seconds so that you can check if the above are correct."
 echo "";
@@ -167,7 +177,7 @@ if [ "$PAIRED" == "1" ]; then
     ckFile "$IN_FQ_R1" "Fastq read1";
     ckFile "$IN_FQ_R2" "Fastq read2";
     if [ "$IN_FQ_R1" == "$IN_FQ_R2" ]; then
-        err "Fastq read1 and read2 files are the same: '$IN_FQ_R2'";
+        err "Fastq read1 and read2 files are the same: '$IN_FQ_R1' '$IN_FQ_R2'";
     fi
 else
     ckFile "$IN_FQ" "Input fastq";
@@ -203,12 +213,12 @@ if [ "$PAIRED" == "0" ]; then
     echo "FASTQ file: $IN_FQ";
     echo "---------------------------------------------------------";
     # at this point, $IN_FQ is just equal to $IN_FQ_R1
-    $BWA_DIR_X/bwa mem -t 10 $ASSEMBLY $IN_FQ > $POST_BWA_SAM_OUTPUT_FILENAME ; 
+    $BWA_DIR_X/bwa mem -R $RG -t 10 $ASSEMBLY $IN_FQ > $POST_BWA_SAM_OUTPUT_FILENAME ; 
 else
     echo "---------------------------------------------------------";
     echo "Running bwa mem on read1, read2 ends";
     echo "---------------------------------------------------------";
-    $BWA_DIR_X/bwa mem -t 10 $ASSEMBLY $IN_FQ_R1 $IN_FQ_R2 > $POST_BWA_SAM_OUTPUT_FILENAME ;
+    $BWA_DIR_X/bwa mem -R $RG -t 10 $ASSEMBLY $IN_FQ_R1 $IN_FQ_R2 > $POST_BWA_SAM_OUTPUT_FILENAME ;
 fi
 
 wait;
@@ -220,8 +230,14 @@ ckFileSz $POST_BWA_SAM_OUTPUT_FILENAME;
 echo "---------------------------------------------------------";
 echo "`date`: Converting to BAM ...";
 echo "---------------------------------------------------------";
-# POST_BWA_BAM_OUTPUT_FILENAME=${POST_BWA_SAM_OUTPUT_FILENAME/.sam/.bam};
 $SAMTOOLS_DIR_X/samtools view -bS $POST_BWA_SAM_OUTPUT_FILENAME -o $OUT_PFX.bam
+
+
+echo "---------------------------------------------------------";
+echo "`date`: BAM conversion finished. Compressing SAM on a child process but will not wait for it";
+echo "---------------------------------------------------------";
+tar -czvpf $POST_BWA_SAM_OUTPUT_FILENAME.tar.gz $POST_BWA_SAM_OUTPUT_FILENAME &
+COMPRESS_SAM_PID=$!
 
 #################
 #
@@ -232,12 +248,13 @@ $SAMTOOLS_DIR_X/samtools view -bS $POST_BWA_SAM_OUTPUT_FILENAME -o $OUT_PFX.bam
 # 	<area id="sort_and_index_bam" >
 if [ "$SORT_BAM" == "1"  ]; then 
  echo "---------------------------------------------------------";
- echo "Creating sorted, indexed bam file";
+ echo "Creating sorted, fixmate-d, indexed bam file";
  echo "---------------------------------------------------------";
  echo " `date` :  Sorting '$OUT_PFX.bam'...";
- $SAMTOOLS_DIR_X/samtools sort $OUT_PFX.bam $OUT_PFX.sorted;
+ PRE_FIXMATE_NAME="$OUT_PFX.pre-fixmate.sorted"
+ $SAMTOOLS_DIR_X/samtools sort $OUT_PFX.bam $PRE_FIXMATE_NAME;
  ckRes $? "$SAMTOOLS_DIR_X/samtools sort";
- ckFileSz "$OUT_PFX.sorted.bam";
+ ckFileSz "$PRE_FIXMATE_NAME.bam";
 
  # to save space
  echo "Deleting unsorted BAM...";
@@ -248,6 +265,17 @@ if [ "$SORT_BAM" == "1"  ]; then
         echo "Unsorted BAM still exists???";
  fi
  
+ echo "`date` : Indexing '$PRE_FIXMATE_NAME.bam'...";
+ $SAMTOOLS_DIR_X/samtools index $PRE_FIXMATE_NAME.bam;
+ ckRes $? "$SAMTOOLS_DIR_X/samtools index";
+ ckFileSz "$PRE_FIXMATE_NAME.bam.bai";
+
+ echo "---------------------------------------------------------";
+ echo "`date`: Cleaning up read pairing information and flags";
+ echo "---------------------------------------------------------";
+ $SAMTOOLS_DIR_X/samtools fixmate $PRE_FIXMATE_NAME.bam $OUT_PFX.sorted.bam
+ wait;
+
  echo "`date` : Indexing '$OUT_PFX.sorted.bam'...";
  $SAMTOOLS_DIR_X/samtools index $OUT_PFX.sorted.bam;
  ckRes $? "$SAMTOOLS_DIR_X/samtools index";
@@ -268,5 +296,11 @@ fi
 echo "---------------------------------------------------------";
 echo "All bwa mem tasks completed successfully!";
 echo "`date` : PID : $$";
+echo ""
+echo "If PID $COMPRESS_SAM_PID for compressing SAM file is still running"
+echo "please wait for it to finish, otherwise, you can now delete SAM file manually:" 
+echo "<<<------IS THERE A PROCESS BELOW HERE?------>>>";
+ps aux | grep -v 'grep' | grep $COMPRESS_SAM_PID
+echo "<<<------IS THERE A PROCESS ABOVE HERE?-------->>>";
 echo "---------------------------------------------------------";
 exit 0 ;
